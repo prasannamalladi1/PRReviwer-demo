@@ -1,0 +1,79 @@
+name: PRReviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Analyze Pull Request
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+
+          diff = subprocess.check_output(
+              ["git", "diff", "--unified=0", base, head],
+              text=True
+          )
+
+          issues = []
+
+          for line in diff.splitlines():
+              if not line.startswith("+") or line.startswith("+++"):
+                  continue
+
+              code = line[1:]
+
+              if re.search(r'password\s*=\s*["\']', code, re.I):
+                  issues.append(
+                      "🔴 **BLOCKING — Hard-coded password detected**\n"
+                      "A password is directly stored in the source code. "
+                      "Use an environment variable or secret manager."
+                  )
+
+              if re.search(r'\beval\s*\(', code):
+                  issues.append(
+                      "🔴 **BLOCKING — Unsafe eval() detected**\n"
+                      "Avoid executing untrusted input with `eval()`."
+                  )
+
+          if not issues:
+              body = "## 🤖 PRReviewer\n\n✅ No blocking issues detected."
+          else:
+              body = "## 🤖 PRReviewer — Code Review\n\n"
+              body += "\n\n".join(
+                  f"{i}. {issue}" for i, issue in enumerate(issues, 1)
+              )
+
+          with open("review.md", "w", encoding="utf-8") as f:
+              f.write(body)
+
+          print(body)
+          PY
+
+      - name: Post review to Pull Request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr comment "$PR_URL" --body-file review.md
